@@ -1,0 +1,5 @@
+ray[serve]
+fair_async_rlock
+pydantic
+numpy
+ujson
