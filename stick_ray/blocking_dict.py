@@ -1,6 +1,5 @@
 import asyncio
-from collections import OrderedDict
-from typing import Optional, Any, List, Hashable, Awaitable, Union
+from typing import Optional, Any, List, Hashable, Awaitable, Union, Dict
 
 
 async def parallel(*awaitables: Awaitable, return_exceptions: bool = False) -> List[Union[Any, BaseException]]:
@@ -24,18 +23,15 @@ async def parallel(*awaitables: Awaitable, return_exceptions: bool = False) -> L
     return list(results)
 
 
-# This is a sentenial value that is used to indicate that no key was provided to the BlockingDict
-sentenial = object()
-
-
 class BlockingDict(object):
     """
     A blocking dictionary that can be used to store and retrieve items in a thread-safe manner.
     """
 
     def __init__(self):
-        self.queue = OrderedDict()  # Used to store items
-        self.cv = asyncio.Condition()  # Used to notify other threads that the queue has been updated
+        self._conditions: Dict[Hashable, asyncio.Condition] = dict()  # Used to store condition variables
+        self._data: Dict[Hashable, Any] = dict()  # Used to store items
+        self._lock = asyncio.Lock()  # Used to lock the dictionary
 
     def keys(self) -> List[Hashable]:
         """
@@ -44,7 +40,7 @@ class BlockingDict(object):
         Returns:
             list of keys
         """
-        return list(self.queue.keys())
+        return list(self._data.keys())
 
     def size(self) -> int:
         """
@@ -53,7 +49,7 @@ class BlockingDict(object):
         Returns:
             size
         """
-        return len(self.queue)
+        return len(self._data)
 
     async def put(self, key: Hashable, value: Any):
         """
@@ -63,39 +59,17 @@ class BlockingDict(object):
             key: key
             value: value
         """
-        async with self.cv:
-            self.queue[key] = value
-            self.cv.notify_all()
+        cv: asyncio.Condition
+        async with self._lock:
+            if key not in self._conditions:
+                # New lock is created for new key which may be overhead (should test)
+                self._conditions[key] = asyncio.Condition()
+            cv = self._conditions[key]  # Get this reference before releasing lock
+        async with cv:
+            self._data[key] = value
+            cv.notify_all()
 
-    async def pop(self, key: Optional[Hashable] = sentenial, timeout: Optional[float] = None) -> Any:
-        """
-        Remove an item from the dictionary, optionally blocking and with timeout.
-
-        Args:
-            key: key
-            timeout: timeout in seconds to wait when blocking.
-
-        Returns:
-            item matching key or first item if no key is provided
-
-        Raises:
-            asyncio.Timeout if timeout elapsed and item not found
-        """
-
-        async def _pop():
-            async with self.cv:
-                if key is sentenial:
-                    await self.cv.wait_for(lambda: len(self.queue) > 0)
-                    return self.queue.pop(next(iter(self.queue.keys())))
-                else:
-                    await self.cv.wait_for(lambda: key in self.queue)
-                    return self.queue.pop(key)
-
-        if timeout is not None:
-            return await asyncio.wait_for(_pop(), timeout=timeout)
-        return await _pop()
-
-    async def peek(self, key: Hashable, timeout: Optional[float] = None):
+    async def peek(self, key: Hashable, timeout: Optional[float] = None) -> Any:
         """
         Get an item from the dictionary, leaving the item there, optionally blocking and with timeout.
 
@@ -109,17 +83,23 @@ class BlockingDict(object):
         Raises:
             asyncio.Timeout if timeout elapsed and item not found
         """
+        cv: asyncio.Condition
+        async with self._lock:
+            if key not in self._conditions:
+                # New lock is created which may be overhead (should test)
+                self._conditions[key] = asyncio.Condition()
+            cv = self._conditions[key]  # Get this reference before releasing lock
 
-        async def _pop():
-            async with self.cv:
-                await self.cv.wait_for(lambda: key in self.queue)
-                return self.queue[key]
+        async with cv:
+            async def _peek():
+                await cv.wait_for(lambda: key in self._data)
+                return self._data[key]
 
-        if timeout is not None:
-            return await asyncio.wait_for(_pop(), timeout=timeout)
-        return await _pop()
+            if timeout is not None:
+                return await asyncio.wait_for(_peek(), timeout=timeout)
+            return await _peek()
 
-    async def has(self, key: Hashable) -> bool:
+    def has(self, key: Hashable) -> bool:
         """
         Check if the dictionary contains the given key.
 
@@ -129,7 +109,7 @@ class BlockingDict(object):
         Returns:
             True if key is in dictionary, False otherwise
         """
-        return key in self.queue
+        return key in self._data
 
     async def delete(self, key: Hashable):
         """
@@ -138,5 +118,17 @@ class BlockingDict(object):
         Args:
             key: key
         """
-        if key in self.queue:
-            del self.queue[key]
+        cv: asyncio.Condition
+        async with self._lock:
+            if key not in self._conditions:
+                # New lock is created which may be overhead (should test)
+                self._conditions[key] = asyncio.Condition()
+            cv = self._conditions[key]  # Get this reference before releasing lock
+
+        async with cv:
+            # Get lock on this condition, prevents a delete from happening while another thread has this lock.
+
+            # Delete the data
+            if key in self._data:
+                del self._data[key]
+                cv.notify_all()
