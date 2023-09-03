@@ -16,7 +16,7 @@ class EventBus:
     """
 
     def __init__(self, name: str):
-        head_node_id = ray.get_runtime_context().node_id.hex()
+        head_node_id = ray.get_runtime_context().get_node_id()
         event_bus_name = self.event_bus_name(name)
 
         try:

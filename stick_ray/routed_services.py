@@ -496,7 +496,7 @@ class RoutedService(BaseRoutedService):
         worker_actor_options = worker_actor_options or dict()
         worker_kwargs = worker_kwargs or dict()
 
-        head_node_id = ray.get_runtime_context().node_id.hex()
+        head_node_id = ray.get_runtime_context().get_node_id()
         router_name = self.router_name(name)
 
         try:
