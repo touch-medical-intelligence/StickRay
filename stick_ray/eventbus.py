@@ -204,7 +204,9 @@ class _EventBus:
         Raises:
             asyncio.Timeout if timeout elapsed and item not found
         """
-        return await self.items.pop(key, timeout)
+        value = await self.items.peek(key, timeout)
+        await self.items.delete(key)
+        return value
 
     async def peek(self, key: Hashable, timeout: Union[float, None] = None):
         """

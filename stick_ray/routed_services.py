@@ -158,7 +158,7 @@ class Router:
                 t0 = current_utc()
                 while current_utc() < t0 + timedelta(minutes=1):  # TODO: could make + 5 sigma of latency stats
                     try:
-                        backpressure: bool = await self._event_bus.pop(
+                        backpressure: bool = await self._event_bus.peek(
                             key=f"{worker_id}_backpressure",
                             timeout=HEARTBEAT_INTERVAL.total_seconds()
                         )
@@ -200,7 +200,7 @@ class Router:
             for worker_id in list(self.workers.keys()):
                 await asyncio.sleep(0)
                 try:
-                    update: Set[str] = await self._event_bus.pop(
+                    update: Set[str] = await self._event_bus.peek(
                         key=f"{worker_id}_update",
                         timeout=HEARTBEAT_INTERVAL.total_seconds() * 2
                     )
