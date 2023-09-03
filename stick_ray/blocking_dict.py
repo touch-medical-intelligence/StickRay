@@ -1,9 +1,9 @@
 import asyncio
 from collections import OrderedDict
-from typing import Optional, Any, List, Hashable, Awaitable
+from typing import Optional, Any, List, Hashable, Awaitable, Union
 
 
-async def parallel(*awaitables: Awaitable, return_exceptions: bool = False) -> List[Any | BaseException]:
+async def parallel(*awaitables: Awaitable, return_exceptions: bool = False) -> List[Union[Any, BaseException]]:
     """
     Run multiple requests in parallel.
 
