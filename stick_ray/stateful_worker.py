@@ -13,7 +13,8 @@ from stick_ray.utils import SerialisableBaseModel, get_or_create_event_loop, cur
 
 __all__ = [
     'StatefulWorker',
-    'StatefulSessionNotFound'
+    'StatefulSessionNotFound',
+    'HEARTBEAT_INTERVAL'
 ]
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL: timedelta = timedelta(seconds=3)
@@ -26,7 +27,8 @@ class StatefulSessionNotFound(Exception):
     pass
 
 
-class _dummy: pass
+class _Dummy:
+    pass
 
 
 class SessionItem(SerialisableBaseModel):
@@ -39,13 +41,13 @@ class StatefulWorker:
     Represents a stateful worker. Handles sessions for sticky connections, and sends heart beats to router.
     """
 
-    def __init__(self, worker_id: str, **kwargs):
+    def __init__(self):
         self._lock = asyncio.Lock()
         self._session_items: Dict[str, SessionItem] = dict()
 
         self._stop_event = asyncio.Event()
         self._event_bus = EventBus(name='routed_services')
-        self._worker_id = worker_id
+        self._worker_id: str | None = None
         self._method_func_cache: Dict[str, Callable[..., Coroutine]] = dict()
 
         self.latency_ms = Histogram(
@@ -56,14 +58,7 @@ class StatefulWorker:
         )
         self.latency_ms.set_default_tags({"routed_service_name": self.__class__.__name__})
 
-        loop = get_or_create_event_loop()
-        task = loop.create_task(self._run_control_loop())
 
-        def clean_up(task, loop):
-            task.cancel()
-            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
-
-        atexit.register(clean_up, task, loop)
 
     async def _run_control_loop(self):
         logger.info(f"Starting worker control loop for {self.__class__.__name__}!")
@@ -126,7 +121,7 @@ class StatefulWorker:
                 ignore_methods = {'ferry', 'get_session_state', 'set_session_state', 'create_session', 'start',
                                   'shutdown', 'check_session', 'get_session_ids', 'health_check'}
                 available = sorted(
-                    filter(lambda x: not x.startswith('_'), set(dir(self)) - set(dir(_dummy())) - ignore_methods)
+                    filter(lambda x: not x.startswith('_'), set(dir(self)) - set(dir(_Dummy())) - ignore_methods)
                 )
                 if method.startswith('_'):
                     raise AttributeError(
@@ -257,11 +252,28 @@ class StatefulWorker:
                     del self._session_items[session_id]
                 return False
 
-    async def start(self):
+    async def start(self, worker_id: str):
         """
         Starts the worker.
+
+        Args:
+            worker_id: worker id to set upon start up.
         """
         async with self._lock:
+            self._worker_id = worker_id
+
+            # Start control loop
+            task = get_or_create_event_loop().create_task(self._run_control_loop())
+
+            def clean_up():
+                loop = get_or_create_event_loop()
+                task.cancel()
+                loop.run_until_complete(task)
+                loop.close()
+
+            atexit.register(clean_up)
+
+            # worker-specific startup protocol
             await self._start()
             logger.info(f"Successful start up.")
 
