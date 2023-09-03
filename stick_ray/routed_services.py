@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from functools import wraps
 from time import monotonic_ns
-from typing import Dict, Set, Type, Any, Callable, TypeVar, Tuple, Protocol
+from typing import Dict, Set, Type, Any, Callable, TypeVar, Tuple, Protocol, Union
 
 import ray
 from ray import ObjectRef
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class AddressNotFound(Exception):
-    def __init__(self, address: str | None = None):
+    def __init__(self, address: Union[str, None] = None):
         super().__init__(f"Address {address} not found.")
 
 
@@ -320,7 +320,7 @@ class Router:
                 self.address_book[session_id].last_query_dt = current_utc()
             else:
                 # get LRU worker, or new worker if all full
-                assigned_worker_id: str | None = None
+                assigned_worker_id: Union[str, None] = None
                 sorted_workers = reversed(
                     sorted(self.workers, key=lambda worker_id: self.workers[worker_id].last_add_dt)
                 )
@@ -484,8 +484,8 @@ class FetchedRoutedService(BaseRoutedService):
 class RoutedService(BaseRoutedService):
     def __init__(self, name: str,
                  worker_cls: Type[StatefulWorker],
-                 worker_actor_options: Dict[str, Any] | None,
-                 worker_kwargs: Dict[str, Any] | None,
+                 worker_actor_options: Union[Dict[str, Any], None],
+                 worker_kwargs: Union[Dict[str, Any], None],
                  max_concurrent_sessions: int,
                  expiry_period: timedelta,
                  min_num_workers: int):
@@ -544,8 +544,8 @@ class FProtocol(Protocol):
 
 def routed_service(
         expiry_period: timedelta,
-        name: str | None = None,
-        worker_actor_options: Dict[str, Any] | None = None,
+        name: Union[str, None] = None,
+        worker_actor_options: Union[Dict[str, Any], None] = None,
         max_concurrent_sessions: int = 10,
         min_num_workers: int = 0
 ) -> Callable[[Type[V]], FProtocol]:

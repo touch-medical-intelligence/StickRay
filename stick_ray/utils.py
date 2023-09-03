@@ -3,7 +3,7 @@ import hashlib
 import inspect
 import uuid
 from datetime import datetime, tzinfo
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Union
 
 import numpy as np
 import ujson
@@ -103,7 +103,7 @@ class SerialisableBaseModel(BaseModel):
         return self.__class__._deserialise, (serialised_data,)
 
 
-def set_datetime_timezone(dt: datetime, offset: str | tzinfo) -> datetime:
+def set_datetime_timezone(dt: datetime, offset: Union[str, tzinfo]) -> datetime:
     """
     Replaces the datetime object's timezone with one from an offset.
 

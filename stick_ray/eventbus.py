@@ -1,5 +1,5 @@
 import logging
-from typing import Any, List, Type, Hashable
+from typing import Any, List, Type, Hashable, Union
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -107,7 +107,7 @@ class EventBus:
         """
         await self._actor.clear.remote(key)
 
-    async def pop(self, key: Hashable, timeout: float | None = None):
+    async def pop(self, key: Hashable, timeout: Union[float, None] = None):
         """
         Remove an item from the bucket, optionally blocking and with timeout.
 
@@ -124,7 +124,7 @@ class EventBus:
         """
         return await self._actor.pop.remote(key, timeout)
 
-    async def peek(self, key: Hashable, timeout: float | None = None):
+    async def peek(self, key: Hashable, timeout: Union[float, None] = None):
         """
         Get an item from the bucket, leaving the item there, optionally blocking and with timeout.
 
@@ -190,7 +190,7 @@ class _EventBus:
         """
         await self.items.delete(key)
 
-    async def pop(self, key: Hashable, timeout: float | None = None):
+    async def pop(self, key: Hashable, timeout: Union[float, None] = None):
         """
         Remove an item from the bucket, optionally blocking and with timeout.
 
@@ -206,7 +206,7 @@ class _EventBus:
         """
         return await self.items.pop(key, timeout)
 
-    async def peek(self, key: Hashable, timeout: float | None = None):
+    async def peek(self, key: Hashable, timeout: Union[float, None] = None):
         """
         Get an item from the bucket, leaving the item there, optionally blocking and with timeout.
 
