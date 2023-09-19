@@ -298,11 +298,8 @@ class Router:
         worker_actor_options = self.worker_actor_options.copy()
         worker_actor_options['name'] = worker_name
         worker_actor_options.pop('lifetime', None)  # make sure we don't accidentally make a detached one
-        new_worker = ray.remote(self.worker_cls).options(**worker_actor_options).remote(
-            worker_id=worker_id,
-            **self.worker_kwargs
-        )
-        await new_worker.start.remote()
+        new_worker = ray.remote(self.worker_cls).options(**worker_actor_options).remote(**self.worker_kwargs)
+        await new_worker.start.remote(worker_id=worker_id)
         logger.info(f"Started {worker_name}")
         self.workers[worker_id] = WorkerEntry(
             worker_actor=new_worker,
@@ -549,6 +546,27 @@ def routed_service(
         max_concurrent_sessions: int = 10,
         min_num_workers: int = 0
 ) -> Callable[[Type[V]], FProtocol]:
+    """
+    A decorator that turns a StatefulWorker into a routed service.
+
+    Args:
+        expiry_period: how long to keep a session alive since last interaction
+        name: the name of the service. If None, the name of the class will be used.
+        worker_actor_options: the worker actor options (see ray.remote)
+        max_concurrent_sessions: maximum number of concurrent sessions per worker, before spinning up a new worker
+        min_num_workers: the minimum number of persistent workers. The number is maintained, but not the specific
+            workers. I.e. the first worker may not be the one that lasts forever, if min_num_workers=1.
+
+    Returns:
+        a decorator that can be applied to a StatefulWorker to turn it into a routed service.
+
+    Usage:
+        @routed_service(expiry_period=timedelta(seconds=10), max_concurrent_sessions=2)
+        class ToyWorker(StatefulWorker):
+            def __init__(self):
+                StatefulWorker.__init__(self)
+    """
+
     def decorator(worker_cls: Type[V]) -> FProtocol:
         if not issubclass(worker_cls, StatefulWorker):
             raise ValueError(f"Only StatefulWorker subclasses can be made into routed services. Got {worker_cls}.")
