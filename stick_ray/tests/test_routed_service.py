@@ -12,6 +12,9 @@ from stick_ray.utils import get_or_create_event_loop
 
 @routed_service(expiry_period=timedelta(seconds=10), max_concurrent_sessions=2)
 class ToyWorker(StatefulWorker):
+    """
+    A toy worker that simulates some blocking work.
+    """
     def __init__(self, delay: timedelta, **kwargs):
         StatefulWorker.__init__(self, **kwargs)
         self.delay = delay
