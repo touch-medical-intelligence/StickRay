@@ -56,4 +56,4 @@ pip install .
 ```
 # Change Log
 
-2 Sept, 2023 -- StickRay 1.0.0 released
+19 Sept, 2023 -- StickRay 1.0.0 released
