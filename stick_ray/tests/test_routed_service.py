@@ -3,17 +3,19 @@ from datetime import timedelta
 from time import sleep
 
 import numpy as np
+import pytest
 import ray
 
-from stick_ray.routed_services import routed_service, NoRoutedServiceFound
+from stick_ray.routed_service import routed_service
+from stick_ray.controller import ServiceNotFoundError
 from stick_ray.stateful_worker import StatefulWorker
 from stick_ray.utils import get_or_create_event_loop
 
 
 @routed_service(expiry_period=timedelta(seconds=10), max_concurrent_sessions=2)
 class ToyWorker(StatefulWorker):
-    def __init__(self, delay: timedelta, **kwargs):
-        StatefulWorker.__init__(self, **kwargs)
+    def __init__(self, delay: timedelta):
+        StatefulWorker.__init__(self)
         self.delay = delay
 
     async def _close_session(self, session_id: str):
@@ -44,11 +46,10 @@ class ToyWorker(StatefulWorker):
 
 def test_run():
     ray.init(address='auto', ignore_reinit_error=True)
-    try:
-        ToyWorker.fetch()
-        assert False
-    except NoRoutedServiceFound:
-        assert True
+    with pytest.raises(ServiceNotFoundError):
+        handle = ToyWorker.get_handle()
+        handle._f('hello', session_id=f'abc')
+
 
     service = ToyWorker(delay=timedelta(seconds=0.5))
     assert service == ToyWorker.fetch()

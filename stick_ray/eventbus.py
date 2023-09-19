@@ -2,6 +2,8 @@ import logging
 from typing import Any, List, Type, Hashable, Union
 
 import ray
+from ray.actor import ActorHandle
+from ray.serve._private.utils import get_head_node_id
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from stick_ray.blocking_dict import BlockingDict
@@ -10,43 +12,62 @@ from stick_ray.namespace import NAMESPACE
 logger = logging.getLogger(__name__)
 
 
-class EventBus:
+class BaseEventBus:
+    def __init__(self, actor: ActorHandle):
+        self._actor = actor
+
+    @classmethod
+    def _deserialise(cls, kwargs):
+        """Required for this class's __reduce__ method to be picklable."""
+        return BaseEventBus(**kwargs)
+
+    def __reduce__(self):
+        # Uses the dict representation of the model to serialise and deserialise.
+        serialised_data = dict(
+            actor=self._actor,
+        )
+        return self.__class__._deserialise, (serialised_data,)
+
+
+class EventBus(BaseEventBus):
     """
-    An event bus for passing messages destined for multiple listeners.
+    An event bus for passing messages between those that care.
     """
 
-    def __init__(self, name: str):
-        head_node_id = ray.get_runtime_context().get_node_id()
-        event_bus_name = self.event_bus_name(name)
+    def __init__(self):
+        actor_name = self.actor_name()
 
         try:
-            event_bus = ray.get_actor(event_bus_name, namespace=NAMESPACE)
-            logger.info(f"Connected to existing {event_bus_name}")
+            actor = ray.get_actor(actor_name, namespace=NAMESPACE)
+            logger.info(f"Connected to existing {actor_name}")
         except ValueError:
-            event_bus_actor_options = {
+            try:
+                placement_node_id = get_head_node_id()
+            except:
+                placement_node_id = ray.get_runtime_context().get_node_id()
+            actor_options = {
                 "num_cpus": 0,
-                "name": event_bus_name,
+                "name": actor_name,
                 "lifetime": "detached",
                 "max_restarts": -1,
                 "max_task_retries": -1,
                 # Schedule the controller on the head node with a soft constraint. This
                 # prefers it to run on the head node in most cases, but allows it to be
                 # restarted on other nodes in an HA cluster.
-                "scheduling_strategy": NodeAffinitySchedulingStrategy(head_node_id, soft=True),
+                "scheduling_strategy": NodeAffinitySchedulingStrategy(placement_node_id, soft=True),
                 "namespace": NAMESPACE,
                 "max_concurrency": 15000  # Needs to be large, as there should be no limit.
             }
 
-            dynamic_cls = self.dynamic_cls(name)
+            dynamic_cls = self.dynamic_cls()
 
-            event_bus_kwargs = dict()
-            event_bus = ray.remote(dynamic_cls).options(**event_bus_actor_options).remote(**event_bus_kwargs)
-            ray.get(event_bus.health_check.remote())
-            logger.info(f"Created new {event_bus_name}")
-        self._actor = event_bus
+            actor = ray.remote(dynamic_cls).options(**actor_options).remote()
+            ray.get(actor.health_check.remote())
+            logger.info(f"Created new {actor_name}")
+        super().__init__(actor=actor)
 
     @staticmethod
-    def dynamic_cls(name: str) -> Type:
+    def dynamic_cls() -> Type:
         """
         Create a dynamic class that will be parsed properly by ray dashboard, so that it has a nice class name.
 
@@ -58,14 +79,14 @@ class EventBus:
         """
         # a dynamic class that will be parsed properly by ray dashboard, so that it has a nice class name.
         return type(
-            f"EventBus:{name}",
+            f"StickRayEventBus",
             (_EventBus,),
             dict(_EventBus.__dict__),
         )
 
     @staticmethod
-    def event_bus_name(name: str) -> str:
-        return f"{name}.event_bus"
+    def actor_name() -> str:
+        return f"STICK_RAY_EVENT_BUS_ACTOR"
 
     async def size(self) -> int:
         """
@@ -150,10 +171,10 @@ class _EventBus:
     def __init__(self):
         self.items = BlockingDict()
 
-    async def health_check(self):
+    def health_check(self):
         return
 
-    async def size(self) -> int:
+    def size(self) -> int:
         """
         Returns the size of the bucket.
 
@@ -162,7 +183,7 @@ class _EventBus:
         """
         return self.items.size()
 
-    async def keys(self) -> List[Hashable]:
+    def keys(self) -> List[Hashable]:
         """
         Returns a list of keys in bucket.
 

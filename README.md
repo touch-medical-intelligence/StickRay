@@ -20,7 +20,7 @@ StickRay is:
 
 # Documentation
 
-For examples, check out the [documentation](https://stick_ray.readthedocs.io/).
+For examples, check out the [documentation](https://stickray.readthedocs.io/).
 
 # Install
 
@@ -51,6 +51,7 @@ Clone repo `git clone https://www.github.com/JoshuaAlbert/stick_ray.git`, and in
 ```bash
 cd stick_ray
 pip install -r requirements.txt
+pip install -r requirements-examples.txt
 pip install -r requirements-tests.txt
 pip install .
 ```

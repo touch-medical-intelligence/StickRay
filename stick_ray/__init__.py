@@ -1,1 +1,1 @@
-from stick_ray.routed_services import *
+from stick_ray.routed_service import *

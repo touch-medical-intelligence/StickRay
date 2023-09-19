@@ -1,13 +1,16 @@
 import asyncio
 import hashlib
 import inspect
+import logging
 import uuid
-from datetime import datetime, tzinfo
-from typing import Dict, Any, Callable, Union
+from datetime import datetime, tzinfo, timedelta
+from typing import Dict, Any, Callable, Union, TypeVar, Type, Coroutine
 
 import numpy as np
 import ujson
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 def get_or_create_event_loop() -> asyncio.AbstractEventLoop:
@@ -66,6 +69,9 @@ def deterministic_uuid(seed: str) -> uuid.UUID:
     return new_uuid
 
 
+C = TypeVar('C')
+
+
 class SerialisableBaseModel(BaseModel):
     """
     A pydantic BaseModel that can be serialised and deserialised using pickle, working well with Ray.
@@ -85,7 +91,7 @@ class SerialisableBaseModel(BaseModel):
         return cls(**kwargs)
 
     @classmethod
-    def parse_obj(cls, obj: Dict[str, Any]) -> 'BaseModel':
+    def parse_obj(cls: Type[C], obj: Dict[str, Any]) -> C:
         model_fields = cls.__fields__  # get fields of the model
 
         # Convert all fields that are defined as np.ndarray
@@ -150,3 +156,19 @@ def is_key_after_star(func: Callable, key: str):
         if param.kind == inspect.Parameter.KEYWORD_ONLY and name == key:
             return True
     return False
+
+
+async def loop_task(task_fn: Callable[[], Coroutine[Any, Any, None]], interval: timedelta):
+    """
+    Runs a task in a loop.
+
+    Args:
+        task_fn: the task
+        interval: the interval between runs
+    """
+    while True:
+        try:
+            await task_fn()
+        except Exception as e:
+            logger.exception(f"Problem with task {task_fn.__name__}: {str(e)}")
+        await asyncio.sleep(interval.total_seconds())

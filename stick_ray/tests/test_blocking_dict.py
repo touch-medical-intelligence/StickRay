@@ -153,17 +153,18 @@ async def test_high_concurrency_adjusted(blocking_dict: BlockingDict):
 
 @pytest.mark.asyncio
 async def test_high_concurrency_with_random_delays(blocking_dict: BlockingDict):
-    # This represents an actual stress test.
+    # This represents an actual stress test of the blocking dict.
+    # 1 million concurrent production/consumption events takes about 55 seconds.
     NUM_TASKS = 1000
 
     async def producer(k):
         for i in range(NUM_TASKS):
-            await asyncio.sleep(random.uniform(0, 0.01))  # random short delay
+            await asyncio.sleep(random.uniform(0, 0.001))  # random short delay
             await blocking_dict.put(f"{k}-{i}", 'value')
 
     async def consumer(k):
         for i in range(NUM_TASKS):
-            await asyncio.sleep(random.uniform(0, 0.01))  # random short delay
+            await asyncio.sleep(random.uniform(0, 0.001))  # random short delay
             await blocking_dict.peek(f"{k}-{i}", timeout=1)
 
     tasks = [producer(k) for k in range(NUM_TASKS)] + [consumer(k) for k in range(NUM_TASKS)]
