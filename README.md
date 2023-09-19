@@ -20,7 +20,7 @@ StickRay is:
 
 # Documentation
 
-For examples, check out the [documentation](https://stick_ray.readthedocs.io/).
+For examples, check out the [documentation](https://stickray.readthedocs.io/).
 
 # Install
 
