@@ -1,61 +1,14 @@
 import logging
-from abc import ABC, abstractmethod
 from typing import Any, Dict
 
+from stick_ray.abc import AbstractStatefulWorker
+from stick_ray.common import SessionStateNotFound
+
 __all__ = [
-    'StatefulWorker',
-    'SessionStateNotFound'
+    'StatefulWorker'
 ]
+
 logger = logging.getLogger(__name__)
-
-
-class SessionStateNotFound(Exception):
-    """
-    Exception raised when a session id is not found.
-    """
-    pass
-
-
-class AbstractStatefulWorker(ABC):
-    """
-    Base class for stateful worker.
-    """
-
-    @abstractmethod
-    async def _create_session(self, session_id: str):
-        """
-        Called when a session is created. This is where you would initialise the session state, and store it.
-
-        Args:
-            session_id: session id to create
-        """
-        ...
-
-    @abstractmethod
-    async def _close_session(self, session_id: str):
-        """
-        Called when a session is closed. This is where you would clean up the session state, and remove it.
-
-        Args:
-            session_id: session id to close
-        """
-        ...
-
-    @abstractmethod
-    async def _start(self):
-        """
-        Called when the worker is started. This can be used to create any resources needed for the worker, e.g.
-        database connections.
-        """
-        ...
-
-    @abstractmethod
-    async def _shutdown(self):
-        """
-        Called when the worker is shut down. This can be used to clean up any resources needed for the worker, e.g.
-        database connections.
-        """
-        ...
 
 
 class StatefulWorker(AbstractStatefulWorker):
@@ -66,7 +19,7 @@ class StatefulWorker(AbstractStatefulWorker):
 
     async def _initialise(self):
         """
-        Initialises the worker from proxy
+        Initialises the worker from proxy, so __init__ is not called.
         """
         self._session_states: Dict[str, Any] = dict()
 

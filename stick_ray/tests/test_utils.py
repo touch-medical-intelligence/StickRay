@@ -4,14 +4,16 @@ import sys
 import uuid
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone, tzinfo
+from unittest.mock import AsyncMock, patch, call
 
 import numpy as np
 import pytest
 import ujson
 from pydantic import ValidationError, BaseModel
 
-from stick_ray.utils import SerialisableBaseModel, deterministic_uuid, get_or_create_event_loop, set_datetime_timezone, \
-    is_key_after_star
+from stick_ray.utils import deterministic_uuid, get_or_create_event_loop, set_datetime_timezone, \
+    is_key_after_star, ValueMonitor, IdentifyBackoffStrategy
+from stick_ray.common import SerialisableBaseModel
 
 VersionInfo = namedtuple("VersionInfo", "major minor micro releaselevel serial")
 
@@ -195,3 +197,59 @@ def test_is_key_after_star():
     assert is_key_after_star(f5, "session_id")
     assert is_key_after_star(f6, "session_id")
     assert is_key_after_star(f6, "cache_key")
+
+
+
+@pytest.mark.asyncio
+async def test_value_changes():
+    # Mocks
+    coroutine_mock = AsyncMock(side_effect=[1, 2, 3])
+    callback_mock = AsyncMock()
+
+    monitor = ValueMonitor(coroutine_mock, callback_mock, timedelta(seconds=0.1))
+    await monitor.start()
+    await asyncio.sleep(0.4)  # Give some time for the monitoring loop to fetch the values
+    await monitor.stop()
+
+    callback_mock.assert_has_calls([call(1), call(2), call(3)])
+
+@pytest.mark.asyncio
+async def test_value_remains_same():
+    coroutine_mock = AsyncMock(return_value=1)
+    callback_mock = AsyncMock()
+
+    monitor = ValueMonitor(coroutine_mock, callback_mock, timedelta(seconds=0.1))
+    await monitor.start()
+    await asyncio.sleep(0.4)  # Give some time for the monitoring loop to fetch the values
+    await monitor.stop()
+
+    callback_mock.assert_called_once_with(1)
+
+@pytest.mark.asyncio
+async def test_error_backoff_strategy():
+    # The coroutine_mock is made to raise an error
+    coroutine_mock = AsyncMock(side_effect=Exception("Sample exception"))
+    callback_mock = AsyncMock()
+    error_strategy_mock = IdentifyBackoffStrategy()
+
+    with patch.object(error_strategy_mock, '__call__', return_value=timedelta(seconds=0.1)) as strategy_mock:
+        monitor = ValueMonitor(coroutine_mock, callback_mock, timedelta(seconds=0.1), error_strategy_mock)
+        await monitor.start()
+        await asyncio.sleep(0.5)  # Give some time for the monitoring loop to attempt fetching the values multiple times
+        await monitor.stop()
+
+    # Since our coroutine_mock raises an error every time, and the strategy is set to sleep 0.1s on errors,
+    # the strategy should have been called multiple times in 0.5s
+    assert strategy_mock.call_count > 3
+
+@pytest.mark.asyncio
+async def test_start_and_stop():
+    coroutine_mock = AsyncMock(return_value=1)
+    callback_mock = AsyncMock()
+
+    monitor = ValueMonitor(coroutine_mock, callback_mock, timedelta(seconds=0.1))
+    await monitor.start()
+    assert monitor.monitor_task is not None
+
+    await monitor.stop()
+    assert monitor.monitor_task is None

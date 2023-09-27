@@ -4,11 +4,12 @@ from datetime import timedelta
 import numpy as np
 import pytest
 import ray
+from stick_ray.utils import get_or_create_event_loop
 
 from stick_ray.common import ServiceNotFoundError
-from stick_ray.routed_service import routed_service
+
+from stick_ray import routed_service
 from stick_ray.stateful_worker import StatefulWorker
-from stick_ray.utils import get_or_create_event_loop
 
 
 @routed_service(expiry_period=timedelta(seconds=10), max_concurrent_sessions=2)
@@ -29,8 +30,8 @@ class ToyWorker(StatefulWorker):
     async def syntax_error(self, session_id: str):
         return None
 
-
-def test_run():
+if __name__ == '__main__':
+    ray.init('auto')
     with pytest.raises(ServiceNotFoundError):
         handle = ToyWorker.get_handle()
         handle._f('hello', session_id=f'abc')
@@ -52,7 +53,7 @@ def test_run():
     except SyntaxError as e:
         assert 'keyword-only arg' in str(e)
 
-    async def test_1():
+    async def run1():
         handle = service.get_handle(sync=False)
         loop = get_or_create_event_loop()
         tasks = []
@@ -63,9 +64,9 @@ def test_run():
         obj_refs = await asyncio.gather(*tasks)
         return await asyncio.gather(*obj_refs)
 
-    assert all(res == 'hello' for res in asyncio.run(test_1()))
+    assert all(res == 'hello' for res in asyncio.run(run1()))
 
-    async def test_2():
+    async def run2():
         handle = service.get_handle(sync=False)
         try:
             await (await handle.make_error(session_id=f'session_abc'))
@@ -73,6 +74,7 @@ def test_run():
         except ValueError as e:
             assert 'Simulate problem' in str(e)
 
-    asyncio.run(test_2())
+    asyncio.run(run2())
 
     # TODO: should also add a test that ensures all workers are dead.
+

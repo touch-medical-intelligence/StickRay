@@ -11,4 +11,4 @@ or the latest release with
 
 .. code-block:: bash
    
-   pip install git+http://github.com/Joshuaalbert/stick_ray.git
+   pip install git+http://github.com/touch-medical-intelligence/stick_ray.git

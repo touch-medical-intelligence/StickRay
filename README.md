@@ -20,7 +20,9 @@ StickRay is:
 
 # Documentation
 
-For examples, check out the [documentation](https://stickray.readthedocs.io/).
+For examples, check out the [documentation](https://stickray.readthedocs.io/). Ray slides from Ray Summit 2023
+presentation
+are [here](https://docs.google.com/presentation/d/1CJvhrCTXmH1cwI1-df8JheQW9c9Rv69T2n-xrFhhcAM/edit?usp=sharing).
 
 # Install
 
@@ -55,6 +57,7 @@ pip install -r requirements-examples.txt
 pip install -r requirements-tests.txt
 pip install .
 ```
+
 # Change Log
 
-2 Sept, 2023 -- StickRay 1.0.0 released
+19 Sept, 2023 -- StickRay 1.0.0 released

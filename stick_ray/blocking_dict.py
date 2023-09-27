@@ -1,26 +1,5 @@
 import asyncio
-from typing import Optional, Any, List, Hashable, Awaitable, Union, Dict
-
-
-async def parallel(*awaitables: Awaitable, return_exceptions: bool = False) -> List[Union[Any, BaseException]]:
-    """
-    Run multiple requests in parallel.
-
-    Args:
-        *awaitables: awaitables to run in parallel
-        return_exceptions: if True, return exceptions instead of raising them
-
-    Returns:
-        list of results
-    """
-    refs = await asyncio.gather(
-        *awaitables
-    )
-    results = await asyncio.gather(
-        *refs,
-        return_exceptions=return_exceptions
-    )
-    return list(results)
+from typing import Optional, Any, List, Dict
 
 
 class BlockingDict(object):
@@ -29,11 +8,11 @@ class BlockingDict(object):
     """
 
     def __init__(self):
-        self._conditions: Dict[Hashable, asyncio.Condition] = dict()  # Used to store condition variables
-        self._data: Dict[Hashable, Any] = dict()  # Used to store items
+        self._conditions: Dict[str, asyncio.Condition] = dict()  # Used to store condition variables
+        self._data: Dict[str, Any] = dict()  # Used to store items
         self._lock = asyncio.Lock()  # Used to lock the dictionary
 
-    def keys(self) -> List[Hashable]:
+    def keys(self) -> List[str]:
         """
         Returns a list of keys in the dictionary.
 
@@ -51,7 +30,7 @@ class BlockingDict(object):
         """
         return len(self._data)
 
-    async def put(self, key: Hashable, value: Any):
+    async def put(self, key: str, value: Any):
         """
         Put an item into the dictionary with the given key. Overwrites the existing value with same key, if it exists.
 
@@ -69,7 +48,7 @@ class BlockingDict(object):
             self._data[key] = value
             cv.notify_all()
 
-    async def peek(self, key: Hashable, timeout: Optional[float] = None) -> Any:
+    async def peek(self, key: str, timeout: Optional[float] = None) -> Any:
         """
         Get an item from the dictionary, leaving the item there, optionally blocking and with timeout.
 
@@ -99,7 +78,7 @@ class BlockingDict(object):
                 return await asyncio.wait_for(_peek(), timeout=timeout)
             return await _peek()
 
-    def has(self, key: Hashable) -> bool:
+    def has(self, key: str) -> bool:
         """
         Check if the dictionary contains the given key.
 
@@ -111,7 +90,7 @@ class BlockingDict(object):
         """
         return key in self._data
 
-    async def delete(self, key: Hashable):
+    async def delete(self, key: str):
         """
         Delete the given key from the dictionary.
 

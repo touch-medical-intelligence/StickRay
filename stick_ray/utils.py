@@ -4,11 +4,9 @@ import inspect
 import logging
 import uuid
 from datetime import datetime, tzinfo, timedelta
-from typing import Dict, Any, Callable, Union, TypeVar, Type, Coroutine
+from typing import Any, Callable, Union, TypeVar, Coroutine
 
-import numpy as np
-import ujson
-from pydantic import BaseModel
+from stick_ray.abc import AbstractBackoffStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -69,46 +67,6 @@ def deterministic_uuid(seed: str) -> uuid.UUID:
     return new_uuid
 
 
-C = TypeVar('C')
-
-
-class SerialisableBaseModel(BaseModel):
-    """
-    A pydantic BaseModel that can be serialised and deserialised using pickle, working well with Ray.
-    """
-
-    class Config:
-        validate_assignment = True
-        arbitrary_types_allowed = True
-        json_loads = ujson.loads  # can use because ujson decodes NaN and Infinity
-        json_dumps = ujson.dumps  # (currently not possible because ujson doesn't encode NaN and Infinity like json)
-        # json_dumps = lambda *args, **kwargs: json.dumps(*args, **kwargs, separators=(',', ':'))
-        json_encoders = {np.ndarray: lambda x: x.tolist()}
-
-    @classmethod
-    def _deserialise(cls, kwargs):
-        """Required for this class's __reduce__ method to be picklable."""
-        return cls(**kwargs)
-
-    @classmethod
-    def parse_obj(cls: Type[C], obj: Dict[str, Any]) -> C:
-        model_fields = cls.__fields__  # get fields of the model
-
-        # Convert all fields that are defined as np.ndarray
-        for name, field in model_fields.items():
-            if isinstance(field.type_, type) and issubclass(field.type_, np.ndarray):
-                if name in obj and isinstance(obj[name], list):
-                    obj[name] = np.array(obj[name])
-
-        return super().parse_obj(obj)
-
-    def __reduce__(self):
-        # Uses the dict representation of the model to serialise and deserialise.
-        # The efficiency of this depends on the efficiency of the dict representation serialisation.
-        serialised_data = self.dict()
-        return self.__class__._deserialise, (serialised_data,)
-
-
 def set_datetime_timezone(dt: datetime, offset: Union[str, tzinfo]) -> datetime:
     """
     Replaces the datetime object's timezone with one from an offset.
@@ -158,7 +116,7 @@ def is_key_after_star(func: Callable, key: str):
     return False
 
 
-async def loop_task(task_fn: Callable[[], Coroutine[Any, Any, None]], interval: timedelta):
+async def loop_task(task_fn: Callable[[], Coroutine[Any, Any, None]], interval: timedelta | Callable[[], timedelta]):
     """
     Runs a task in a loop.
 
@@ -171,4 +129,71 @@ async def loop_task(task_fn: Callable[[], Coroutine[Any, Any, None]], interval: 
             await task_fn()
         except Exception as e:
             logger.exception(f"Problem with task {task_fn.__name__}: {str(e)}")
+        if callable(interval):
+            await asyncio.sleep(interval().total_seconds())
+            continue
         await asyncio.sleep(interval.total_seconds())
+
+
+class IdentifyBackoffStrategy(AbstractBackoffStrategy):
+
+    def __call__(self, attempt: int) -> timedelta:
+        return timedelta(seconds=0)
+
+
+class ValueMonitor:
+    """
+    Monitors a value by polling a coroutine at a given interval.
+    """
+    V = TypeVar('V')
+
+    def __init__(self, coroutine_to_poll: Callable[[], Coroutine[Any, Any, V]],
+                 callback: Callable[[V], None], init_poll_interval: timedelta,
+                 error_backoff_strategy: AbstractBackoffStrategy | None = None):
+        self.coroutine_to_poll = coroutine_to_poll
+        self.callback = callback
+        self.poll_interval = init_poll_interval
+        self.error_backoff_strategy = error_backoff_strategy or IdentifyBackoffStrategy()  # No backoff by default
+        self.last_value = None
+        self.monitor_task = None
+        self.error_count = 0
+
+    async def start_monitoring(self):
+        while True:
+            try:
+                new_value = await self.coroutine_to_poll()
+
+                if new_value != self.last_value:
+                    self.last_value = new_value
+                    self.callback(new_value)
+
+                self.error_count = 0  # Reset error count on success
+                await asyncio.sleep(self.poll_interval.total_seconds())
+
+            except asyncio.CancelledError:
+                logging.info("Monitoring task was cancelled!")
+                break
+            except Exception as e:
+                logging.error(f"Error while monitoring value: {e}")
+                self.error_count += 1
+                backoff_time = self.error_backoff_strategy(self.error_count)
+                await asyncio.sleep(backoff_time.total_seconds())
+
+    async def start(self):
+        """
+        Start monitoring the value.
+        """
+        if self.monitor_task is None:
+            self.monitor_task = asyncio.create_task(self.start_monitoring())
+
+    async def stop(self):
+        """
+        Stop monitoring the value.
+        """
+        if self.monitor_task:
+            self.monitor_task.cancel()
+            try:
+                await self.monitor_task
+            except asyncio.CancelledError:
+                pass
+            self.monitor_task = None

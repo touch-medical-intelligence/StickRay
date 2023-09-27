@@ -2,34 +2,21 @@ import logging
 from typing import Any, List, Type, Hashable, Union
 
 import ray
-from ray.actor import ActorHandle
 from ray.serve._private.utils import get_head_node_id
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from stick_ray.abc import AbstractEventBus
+from stick_ray.actor_interface import ActorInterface
 from stick_ray.blocking_dict import BlockingDict
 from stick_ray.namespace import NAMESPACE
 
+__all__ = [
+    'EventBus'
+]
 logger = logging.getLogger(__name__)
 
 
-class BaseEventBus:
-    def __init__(self, actor: ActorHandle):
-        self._actor = actor
-
-    @classmethod
-    def _deserialise(cls, kwargs):
-        """Required for this class's __reduce__ method to be picklable."""
-        return BaseEventBus(**kwargs)
-
-    def __reduce__(self):
-        # Uses the dict representation of the model to serialise and deserialise.
-        serialised_data = dict(
-            actor=self._actor,
-        )
-        return self.__class__._deserialise, (serialised_data,)
-
-
-class EventBus(BaseEventBus):
+class EventBus(AbstractEventBus, ActorInterface):
     """
     An event bus for passing messages between those that care.
     """
@@ -64,7 +51,8 @@ class EventBus(BaseEventBus):
             actor = ray.remote(dynamic_cls).options(**actor_options).remote()
             ray.get(actor.health_check.remote())
             logger.info(f"Created new {actor_name}")
-        super().__init__(actor=actor)
+
+        ActorInterface.__init__(self, actor=actor)
 
     @staticmethod
     def dynamic_cls() -> Type:
@@ -88,82 +76,8 @@ class EventBus(BaseEventBus):
     def actor_name() -> str:
         return f"STICK_RAY_EVENT_BUS_ACTOR"
 
-    async def size(self) -> int:
-        """
-        Returns the size of the bucket.
 
-        Returns:
-            int, size
-        """
-        return await self._actor.size()
-
-    async def keys(self) -> List[str]:
-        """
-        Returns a list of keys in bucket.
-
-        Returns:
-            list of string keys
-        """
-        return await self._actor.keys()
-
-    async def write(self, key: Hashable, item: Any):
-        """
-        Store an item with a given key.
-
-        Args:
-            key:
-            item:
-
-        Returns:
-
-        """
-        await self._actor.write.remote(key, item)
-
-    async def clear(self, key: Hashable):
-        """
-        Clear the bucket of all items for this user
-
-        Args:
-            key: tracking UUID
-        """
-        await self._actor.clear.remote(key)
-
-    async def pop(self, key: Hashable, timeout: Union[float, None] = None):
-        """
-        Remove an item from the bucket, optionally blocking and with timeout.
-
-        Args:
-            key: tracking UUID
-            timeout: float, timeout in seconds to wait when blocking.
-
-        Returns:
-            item matching key
-
-        Raises:
-            Timeout if block=True and timeout elapsed and item not found
-            NotFound if block=False and item not found
-        """
-        return await self._actor.pop.remote(key, timeout)
-
-    async def peek(self, key: Hashable, timeout: Union[float, None] = None):
-        """
-        Get an item from the bucket, leaving the item there, optionally blocking and with timeout.
-
-        Args:
-            key: tracking UUID
-            timeout: float, timeout in seconds to wait when blocking.
-
-        Returns:
-            item matching key
-
-        Raises:
-            Timeout if block=True and timeout elapsed and item not found
-            NotFound if block=False and item not found
-        """
-        return await self._actor.peek.remote(key, timeout)
-
-
-class _EventBus:
+class _EventBus(AbstractEventBus):
     """
     Like a Queue except, items are popped by tracking key.
     """

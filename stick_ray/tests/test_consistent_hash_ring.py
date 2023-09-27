@@ -221,3 +221,52 @@ def test_distribution_change_with_weight_update():
     proportion_updated = distributions_updated["worker_2"] / total_updated
 
     assert proportion_initial < proportion_updated
+
+
+@pytest.fixture
+def setup_ring():
+    nodes = [("node1", 1), ("node2", 2), ("node3", 1)]
+    ring = ConsistentHashRing(nodes)
+    return ring
+
+
+def test_node_iter_yields_nodes_in_order(setup_ring):
+    session_id = "some_session_id"
+    gen = setup_ring.node_iter(session_id)
+
+    nodes = [next(gen) for _ in range(3)]
+
+    with pytest.raises(NoAvailableNode):
+        next(gen)
+
+    assert "node1" in nodes
+    assert "node2" in nodes
+    assert "node3" in nodes
+
+
+def test_node_iter_raises_empty_ring_exception():
+    ring = ConsistentHashRing()
+    with pytest.raises(EmptyRing):
+        _ = next(ring.node_iter("some_session_id"))
+
+
+def test_node_iter_raises_no_available_node_exception(setup_ring):
+    session_id = "some_session_id"
+    nodes_iter = setup_ring.node_iter(session_id)
+
+    # Exhaust the iterator
+    for _ in range(3):
+        next(nodes_iter)
+
+    with pytest.raises(NoAvailableNode):
+        next(nodes_iter)
+
+
+def test_node_iter_wraps_around(setup_ring):
+    # Get a session_id that will be close to the end of the ring's keys
+    for node in set(setup_ring.ring.values()):
+        nodes_iter = setup_ring.node_iter(node)
+        for _ in range(3):
+            next(nodes_iter)
+        with pytest.raises(NoAvailableNode):
+            next(nodes_iter)

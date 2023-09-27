@@ -1,7 +1,13 @@
 import bisect
 import hashlib
 import logging
-from typing import Set, str, Tuple, List, Generator
+from typing import Set, Tuple, List, Generator
+
+__all__ = [
+    'ConsistentHashRing',
+    'NoAvailableNode',
+    'EmptyRing'
+]
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +89,7 @@ class ConsistentHashRing:
 
         # We loop to ensure that even if we hit the end of the ring,
         # we can wrap around to the beginning
+        hot_nodes = set()
         start_position = position
         while True:
             if position == len(self.sorted_keys):
@@ -91,7 +98,9 @@ class ConsistentHashRing:
             node = self.ring[self.sorted_keys[position]]
 
             # If the node is not hot, return it. Otherwise, move to the next node.
-            yield node
+            if node not in hot_nodes:
+                yield node
+            hot_nodes.add(node)
             position += 1
 
             # If we've circled back to the start position, then all nodes are hot.

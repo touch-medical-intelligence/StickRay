@@ -2,72 +2,35 @@ import asyncio
 import atexit
 import logging
 from datetime import timedelta, datetime
-from typing import Type, Tuple, Any, Dict, Callable, Coroutine, Set
+from typing import Type, Tuple, Dict, Callable, Coroutine, TypeVar, Any
 
 import ray
 from ray import ObjectRef
-from ray.actor import exit_actor, ActorHandle
+from ray.actor import exit_actor
 from ray.util.metrics import Histogram
 
-from stick_ray.controller import WorkerParams
+from stick_ray.abc import AbstractWorkerProxy, WorkerParams
+from stick_ray.actor_interface import ActorInterface
+from stick_ray.common import BackPressure, WorkerUpdate, SessionNotFound, WorkerStillBusyError, SerialisableBaseModel
 from stick_ray.eventbus import EventBus
 from stick_ray.namespace import NAMESPACE
 from stick_ray.stateful_worker import StatefulWorker
-from stick_ray.utils import get_or_create_event_loop, loop_task, current_utc, is_key_after_star, SerialisableBaseModel
+from stick_ray.utils import get_or_create_event_loop, loop_task, current_utc, is_key_after_star
 
 logger = logging.getLogger(__name__)
-
-HEARTBEAT_INTERVAL: timedelta = timedelta(seconds=3)
 
 
 class _Dummy:
     pass
 
 
-class SessionAlreadyExists(Exception):
-    """
-    Exception raised when a session id is not found.
-    """
-    pass
-
-
 class SessionItem(SerialisableBaseModel):
     lock: asyncio.Lock  # lock for session
     last_use_dt: datetime  # last time a session was used
+    expiry_task: asyncio.Task | None = None  # task to expire session
 
 
-class WorkerUpdate(SerialisableBaseModel):
-    utilisation: float  # the capacity of the worker, 0 means empty. 1 means full.
-    lazy_downscale: bool  # whether the worker is marked for downscaling soon
-    session_ids: Set[str]  # session ids managed by the worker
-
-
-class SessionNotFound(Exception):
-    pass
-
-
-class BackPressure(Exception):
-    pass
-
-
-class BaseWorkerProxy:
-    def __init__(self, actor: ActorHandle):
-        self._actor = actor
-
-    @classmethod
-    def _deserialise(cls, kwargs):
-        """Required for this class's __reduce__ method to be picklable."""
-        return BaseWorkerProxy(**kwargs)
-
-    def __reduce__(self):
-        # Uses the dict representation of the model to serialise and deserialise.
-        serialised_data = dict(
-            actor=self._actor,
-        )
-        return self.__class__._deserialise, (serialised_data,)
-
-
-class WorkerProxy(BaseWorkerProxy):
+class WorkerProxy(AbstractWorkerProxy, ActorInterface):
     """
     Proxy for a stateful worker. This class is responsible for managing sessions, and ferrying requests to the correct
     session. It also provides a control loop to manage the worker, and a health check method.
@@ -85,7 +48,7 @@ class WorkerProxy(BaseWorkerProxy):
             worker_actor_options['namespace'] = NAMESPACE
             # No restart, another worker will be started cleanly by controller
             worker_actor_options['max_restart'] = 0
-            worker_actor_options['max_task_retries'] = -1
+            worker_actor_options.pop('max_task_retries', None)  # Don't set if max_restart==0
             if worker_actor_options.pop('lifetime', None):  # make sure we don't accidentally make a detached one
                 logger.warning(f"Bad pattern: do not set `lifetime=detached` for {service_name}.")
 
@@ -97,7 +60,7 @@ class WorkerProxy(BaseWorkerProxy):
             )
             ray.get(actor.health_check.remote())
             logger.info(f"Created new {actor_name}")
-        super().__init__(actor=actor)
+        ActorInterface.__init__(self, actor=actor)
 
     @staticmethod
     def _dynamic_worker_actor_cls(service_name: str) -> Type:
@@ -132,102 +95,14 @@ class WorkerProxy(BaseWorkerProxy):
         # Low chance of collision.
         return f"STICK_RAY_REPLICA:{service_name}#{worker_id[:8]}"
 
-    async def health_check(self):
-        """
-        A no-op health check.
-        """
-        return await self._actor.health_check.remote()
 
-    async def mark_lazy_downscale(self):
-        """
-        Marks the worker for downscaling soon. Cannot add more sessions during this time.
-        """
-        await self._actor.mark_lazy_downscale.remote()
-
-    def unmark_lazy_downscale(self):
-        """
-        Marks the worker to stay alive, in case it was marked for lazy downscale.
-        """
-        await self._actor.unmark_lazy_downscale.remote()
-
-    async def create_session(self, session_id: str):
-        """
-        Creates a session for the given session id.
-
-        Args:
-            session_id: session id, e.g. a user UUID.
-
-        Raises:
-            SessionAlreadyExists if session already exists
-            RejectSession if worker is hot, or marked for lazy downscale
-        """
-        return await self._actor.create_session.remote(session_id=session_id)
-
-    async def close_session(self, session_id: str):
-        """
-        Closes a session on the worker.
-
-        Args:
-            session_id: session id
-
-        Raises:
-            SessionNotFound if session not found.
-        """
-        return await self._actor.close_session.remote(session_id=session_id)
-
-    async def start(self):
-        """
-        Starts the worker.
-        """
-        return await self._actor.start.remote()
-
-    async def shutdown(self):
-        """
-        Shuts down the worker.
-        """
-        return await self._actor.shutdown.remote()
-
-    async def check_session(self, session_id: str) -> bool:
-        """
-        Checks if the given session id is managed by the worker.
-
-        Args:
-            session_id: session id to check
-
-        Returns:
-            true if managed
-        """
-        return await self._actor.check_session.remote(session_id=session_id)
-
-    async def ferry(self, method: str, data_ref_tuple: Tuple[ObjectRef], session_id: str,
-                    grant: bool) -> Any:
-        """
-        Ferries a method to this worker and then returns the result as an object ref.
-
-        Args:
-            method: method name to ferry
-            data_ref_tuple: an object ref of tuple (args, kwargs)
-            session_id: session id to ferry to
-            grant: whether session creation granted
-
-        Returns:
-            an object ref to the result of the operation, i.e. the task is awaited, and then put into object store.
-
-        Raises:
-            SessionNotFound if granted=False, and if session_id not currently managed, i.e. expired session or it never existed.
-            BackPressure  if granted=False, and if worker rejects placement
-            AttributeError if method is not found.
-            SyntaxError if method is not defined correctly.
-            ValueError if session_id is found in the kwargs, as this results in an overwrite.
-        """
-        return await self._actor.ferry.remote(method=method, data_ref_tuple=data_ref_tuple, session_id=session_id)
-
-
-class _WorkerProxy:
+class _WorkerProxy(AbstractWorkerProxy):
     """
     Proxy for a stateful worker. This class is responsible for managing sessions, and ferrying methods to the correct
     session. It also provides a control loop to manage the worker, and a health check method.
     """
+
+    _prune_interval = timedelta(seconds=10)
 
     def __init__(self, service_name: str, worker_id: str, worker_params: WorkerParams):
         self._service_name = service_name
@@ -240,10 +115,11 @@ class _WorkerProxy:
         self._worker = worker_params.worker_cls(**worker_params.worker_kwargs)
         self._lazy_downscale: bool = False
 
-        self._worker_lock = asyncio.Lock()
-        self._sessions_lock = asyncio.Lock()
-        self._session_items: Dict[str, SessionItem] = dict()
+        self._worker_lock = asyncio.Lock()  # For locking changes to the worker
+        self._session_items_lock = asyncio.Lock()  # For locking changes to the session items
+        self._session_items: Dict[str, SessionItem] = dict()  # session_id -> SessionItem
 
+        self._gossip_interval = timedelta(seconds=10)
         self._event_bus = EventBus()
         self._method_func_cache: Dict[str, Callable[..., Coroutine]] = dict()
 
@@ -261,60 +137,57 @@ class _WorkerProxy:
             self._initialise()
         )
 
-        atexit.register(self._atexit_clean_up())
+        atexit.register(self._atexit_clean_up)
 
     def _atexit_clean_up(self):
         async def stop_worker():
-            # Any open sessions will *not* be closed.
             async with self._worker_lock:
-                async with self._sessions_lock:
-                    try:
-                        await self._worker._shutdown()
-                        logger.info(f"Successful shut down of worker.")
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        logger.error(f"Problem cleaning up. {str(e)}")
-                        raise
+                # TODO: shutdown sessions, perhaps?
+                try:
+                    await self._worker._shutdown()
+                    logger.info(f"Successful shut down of worker.")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"Problem cleaning up. {str(e)}")
+                    raise
 
         # Run the worker shutdown
         loop = get_or_create_event_loop()
         try:
             loop.run_until_complete(stop_worker())
         except asyncio.CancelledError:
-            logger.error("Worker shutdown as cancelled before finishing.")
+            logger.error("Worker shutdown as cancelled before finishing shutting down.")
         except Exception as e:
             logger.error(f"Problem stopping worker. {str(e)}")
             raise
         finally:
-            loop.close()
-
-        if self._control_long_running_task is not None:
-            loop = get_or_create_event_loop()
-            try:
-                self._control_long_running_task.cancel()
-                loop.run_until_complete(self._control_long_running_task)
-            except asyncio.CancelledError:
-                logger.info("Successfully cancelled control loop.")
-            except Exception as e:
-                logger.error(f"Problem stopping control loop. {str(e)}")
-                raise
-            finally:
-                loop.close()
+            # Ensure to shutdown the control loop
+            if self._control_long_running_task is not None:
+                try:
+                    self._control_long_running_task.cancel()
+                    loop.run_until_complete(self._control_long_running_task)
+                except asyncio.CancelledError:
+                    logger.info("Successfully cancelled control loop.")
+                except Exception as e:
+                    logger.error(f"Problem stopping control loop. {str(e)}")
+                    raise
+                finally:
+                    # loop.close()
+                    ...
 
     async def _initialise(self):
         async with self._worker_lock:
-            async with self._sessions_lock:
-                try:
-                    await self._worker._initialise()
-                    # worker-specific startup protocol
-                    await self._worker._start()
-                    logger.info(f"Successful start up.")
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.error(f"Problem in worker start: {str(e)}")
-                    raise e
+            try:
+                await self._worker._initialise()
+                # worker-specific startup protocol
+                await self._worker._start()
+                logger.info(f"Successful start up.")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Problem in worker start: {str(e)}")
+                raise e
         await self._run_control_loop()
 
     async def _run_control_loop(self):
@@ -322,8 +195,7 @@ class _WorkerProxy:
         while True:
             try:
                 await asyncio.gather(
-                    loop_task(task_fn=self._gossip, interval=HEARTBEAT_INTERVAL),
-                    loop_task(task_fn=self._prune_expired_sessions, interval=timedelta(seconds=1)),
+                    loop_task(task_fn=self._gossip, interval=lambda: self._gossip_interval),
                     return_exceptions=False
                 )
             except asyncio.CancelledError:
@@ -333,10 +205,19 @@ class _WorkerProxy:
                 logger.info("Restarting control loop")
 
     async def _utilisation(self) -> float:
-        # TODO: implement backpressure based on resource usage
+        """
+        Get the utilisation of the worker.
+
+        Returns:
+            utilisation of the worker, between 0 and 1.
+        """
+        # TODO: implement based on resource usage
         return len(self._session_items) / self._worker_params.max_concurrent_sessions
 
     async def _gossip(self):
+        """
+        Gossip to the event bus.
+        """
         # Heatbeat/Backpressure/Session map signal
         update = WorkerUpdate(
             utilisation=await self._utilisation(),
@@ -348,157 +229,106 @@ class _WorkerProxy:
             item=update
         )
 
-    async def _prune_expired_sessions(self):
-        # Should not prune a session while it is being ferried, so we use the same locking structure.
-        for session_id in list(self._session_items):
-            session_exists = False
-            try:
-                await self._sessions_lock.acquire()
-                try:
-                    if session_id not in self._session_items:
-                        continue
-                    session_exists = True
-                    await self._session_items[session_id].lock.acquire()
-                finally:
-                    self._sessions_lock.release()
-
-                # Start prune
-                if current_utc() > self._session_items[session_id].last_use_dt + self._worker_params.expiry_period:
-                    logger.info(f"Session {session_id} expired. Closing down.")
-                    try:
-                        await self._worker._close_session(session_id=session_id)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        logger.info(f"Failed to close session {session_id}: {str(e)}")
-                        raise
-                    finally:
-                        del self._session_items[session_id]
-                # End prune
-            finally:
-                if session_exists:
-                    if self._session_items[session_id].lock.locked():
-                        self._session_items[session_id].lock.release()
-
-    def health_check(self):
+    async def health_check(self):
         """
         A no-op health check.
         """
         return
 
-    def mark_lazy_downscale(self):
-        """
-        Marks the worker for downscaling soon. Cannot add more sessions during this time.
-        """
+    async def set_gossip_interval(self, interval: timedelta):
+        self._gossip_interval = interval
+
+    async def mark_lazy_downscale(self):
         self._lazy_downscale = True
 
-    def unmark_lazy_downscale(self):
-        """
-        Marks the worker to stay alive, in case it was marked for lazy downscale.
-        """
+    async def unmark_lazy_downscale(self):
         self._lazy_downscale = False
 
-    async def _granted_create_session(self, session_id: str):
+    async def _set_expiry(self, session_id: str):
         """
-        Creates a session for the given session id.
+        Sets the expiry task for the given session id.
+
+        Args:
+            session_id: session id to set expiry for
+        """
+        if session_id not in self._session_items:
+            return
+
+        expiry_task = self._session_items[session_id].expiry_task
+
+        # Cancel existing task if it exists
+        if (expiry_task is not None) and (not expiry_task.done()):
+            expiry_task.cancel()
+            try:
+                await expiry_task
+            except asyncio.CancelledError:
+                pass
+
+        async def _wait_expire():
+            # Waits then expires session, this will be cancelled if session is used again.
+            await asyncio.sleep(self._worker_params.expiry_period.total_seconds())
+            # Importantly, we grab the session lock if it's still here.
+            if session_id not in self._session_items:
+                return
+            session_lock = self._session_items[session_id].lock
+            async with session_lock:
+                try:
+                    await self._worker._close_session(session_id=session_id)
+                finally:
+                    del self._session_items[session_id]
+
+        self._session_items[session_id].expiry_task = get_or_create_event_loop().create_task(_wait_expire())
+
+    async def _granted_create_session(self, session_id: str, session_lock: asyncio.Lock | None = None):
+        """
+        Creates a session for the given session id. Idempotent.
 
         Args:
             session_id: session id, e.g. a user UUID.
+            lock: lock to use for session, if None, will create a new lock.
+
+        Raises:
+            ValueError: if sessions are not locked when calling this method.
         """
+
+        if not self._session_items_lock.locked():
+            raise ValueError(f"Sessions lock must be locked to create a session.")
+
+        # This is idempotent so that concurrent race conditions are resolved at the session creation level.
+        if session_id in self._session_items:
+            return
+
+        # Set expiry needs session to exist, so we need to create it, but get the lock here first.
+        self._session_items[session_id] = SessionItem(
+            lock=session_lock or asyncio.Lock(),
+            last_use_dt=current_utc()
+        )
+        success = False
         try:
             await self._worker._create_session(session_id=session_id)
-            self._session_items[session_id] = SessionItem(
-                lock=asyncio.Lock(),
-                last_use_dt=current_utc()
-            )
+            await self._set_expiry(session_id=session_id)
+            success = True
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"Failed to create session {session_id}: {str(e)}")
-            if session_id in self._session_items:
-                del self._session_items[session_id]
             raise e
-
-    async def close_session(self, session_id: str):
-        """
-        Closes a session on the worker.
-
-        Args:
-            session_id: session id
-
-        Raises:
-            SessionNotFound if session not found.
-        """
-
-        session_exists = False
-        try:
-            await self._sessions_lock.acquire()
-            try:
-                # Check if service is registered.
-                if session_id not in self._session_items:
-                    raise SessionNotFound(session_id)
-                session_exists = True
-                await self._session_items[session_id].lock.acquire()
-            finally:
-                self._sessions_lock.release()
-
-            # Start operation
-            try:
-                await self._worker._close_session(session_id=session_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"Failed to close session {session_id}: {str(e)}")
-                raise e
-            finally:
-                del self._session_items[session_id]
-            # End operation
-
         finally:
-            if session_exists:
-                if self._session_items[session_id].lock.locked():
-                    self._session_items[session_id].lock.release()
+            if not success:
+                # So we don't end up with sessions upon failure.
+                del self._session_items[session_id]
 
     async def shutdown(self):
-        """
-        Gracefully shuts down the worker.
-        """
+        if len(self._session_items) > 0:
+            raise WorkerStillBusyError(f"Still handling {len(self._session_items)} sessions.")
         # The atexit handler will do all the work
         exit_actor()
 
-    def check_session(self, session_id: str) -> bool:
-        """
-        Checks if the given session id is managed by the worker.
-
-        Args:
-            session_id: session id to check
-
-        Returns:
-            true if managed
-        """
+    async def check_session(self, session_id: str) -> bool:
         return session_id in self._session_items
 
     async def ferry(self, method: str, data_ref_tuple: Tuple[ObjectRef], session_id: str,
                     grant: bool) -> Tuple[ObjectRef]:
-        """
-        Ferries a method to this worker and then returns the result as an object ref.
-
-        Args:
-            method: method name to ferry
-            data_ref_tuple: an object ref of tuple (args, kwargs)
-            session_id: session id to ferry to
-            grant: whether this ferry grants permission to create session if needed.
-
-        Returns:
-            an object ref to the result of the operation, i.e. the task is awaited, and then put into object store.
-
-        Raises:
-            SessionNotFound if session_id not currently managed, i.e. expired session or it never existed.
-            BackPressure if worker rejects placement
-            AttributeError if method is not found.
-            SyntaxError if method is not defined correctly.
-            ValueError if session_id is found in the kwargs, as this results in an overwrite.
-        """
 
         # Mesure latency from the top
         start_dt = current_utc()
@@ -528,26 +358,7 @@ class _WorkerProxy:
         # session lock is acquired. In order for this to be robust all other modifications to the sessions must
         # follow the same pattern.
 
-        session_exists = False
-        try:
-            await self._sessions_lock.acquire()
-            try:
-                # Check if session exists
-                if session_id in self._session_items:
-                    pass
-                else:
-                    if grant:
-                        await self._granted_create_session(session_id=session_id)
-                    if self._lazy_downscale or (await self._utilisation()):
-                        raise BackPressure()
-                    raise SessionNotFound(session_id)
-
-                session_exists = True
-                await self._session_items[session_id].lock.acquire()
-            finally:
-                self._sessions_lock.release()
-
-            # Start ferry
+        async def ferry_op() -> Tuple[ObjectRef]:
             # Get the inputs locally.
             (data_ref,) = data_ref_tuple
             data = await data_ref  # retrieve the input locally
@@ -562,10 +373,69 @@ class _WorkerProxy:
             self.latency_ms.observe(dt.total_seconds() * 1e3, tags=dict(method=method))
             logger.info(f"Handled {method} in session {session_id} in {dt.total_seconds() * 1e3:0.1f} ms.")
             result_ref = ray.put(result)
+            await self._set_expiry(session_id=session_id)
             return (result_ref,)
-            # End ferry
+
+        try:
+            return await self._safe_session_fn(session_id=session_id, fn=ferry_op, grant=grant)
+        except SessionNotFound:
+            if self._lazy_downscale or (await self._utilisation() > 1.):
+                raise BackPressure()
+            raise
+
+    T = TypeVar('T')
+
+    async def _safe_session_fn(self, session_id: str, fn: Callable[..., Coroutine[Any, Any, T]], grant: bool) -> T:
+        """
+        Safely runs a function that requires session lock, with optional grant of session creation
+
+        Args:
+            session_id: session id to run function on
+            fn: function to run
+            grant: whether to grant session creation if session does not exist
+
+        Returns:
+            the result of the function
+
+        Raises:
+            SessionNotFound: if session_id not currently managed and `grant` is False.
+        """
+
+        # First, try to get the lock for the session. If it doesn't exist, we'll get a KeyError.
+        if session_id not in self._session_items:
+            if grant:
+                # We need the global session items lock, because granting yields control
+                async with self._session_items_lock:
+                    # This is idempotent, so no worries about races.
+                    await self._granted_create_session(session_id=session_id)
+                    session_lock = self._session_items[session_id].lock
+                    await session_lock.acquire()
+            else:
+                raise SessionNotFound(session_id)
+        else:
+            # Since we do not yield control at any point, we can safely find the session.
+            session_lock = self._session_items[session_id].lock
+            # When we yield someone could remove `session_id` from `session_items`, so we need to check again below.
+            await session_lock.acquire()
+
+        try:
+            # This is the double-check which is necessary to handle race conditions.
+            if session_id not in self._session_items:
+                if grant:
+                    async with self._session_items_lock:
+                        # We pass in the currently held session lock to set.
+                        await self._granted_create_session(session_id=session_id, session_lock=session_lock)
+                else:
+                    raise SessionNotFound(session_id)
+
+            # perform operations on the session
+            try:
+                return await fn()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Problem in session {session_id}: {str(e)}")
+                raise e
 
         finally:
-            if session_exists:
-                if self._session_items[session_id].lock.locked():
-                    self._session_items[session_id].lock.release()
+            session_lock.release()

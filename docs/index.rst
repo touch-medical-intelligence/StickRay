@@ -16,7 +16,7 @@ Our mission is to make scalable resilient stick connections for Ray.
    :glob:
 
    user-guide/*
-   Change Log <https://github.com/Joshuaalbert/stick_ray#change-log>
+   Change Log <https://github.com/touch-medical-intelligence/stick_ray#change-log>
 
 
 .. toctree::
